@@ -1,0 +1,14 @@
+{
+  "best_params": {
+    "max_depth": 5,
+    "learning_rate": 0.04985563418051735,
+    "subsample": 0.7914184237195452,
+    "colsample_bytree": 0.7404795369196714,
+    "reg_lambda": 0.10501621302645897,
+    "reg_alpha": 0.002820792156327651,
+    "min_child_weight": 4
+  },
+  "best_val_logloss": 0.638669597824366,
+  "n_trials": 100,
+  "tuned_at": "2026-04-15T20:22:03.463555+00:00"
+}
