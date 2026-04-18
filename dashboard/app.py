@@ -3,11 +3,12 @@
 Launch with:
     streamlit run dashboard/app.py
 
-Four tabs:
+Five tabs:
   1. Today's Predictions  — model-implied win probabilities for upcoming games
   2. Historical Accuracy   — rolling accuracy + reliability curve on past predictions
   3. Edge Finder           — model probs vs. market implied probs (from The Odds API)
   4. Elo Leaderboard       — current team ratings + recent form
+  5. Backtest              — bankroll simulation over walk-forward predictions + historical odds
 """
 from __future__ import annotations
 
@@ -28,7 +29,11 @@ from db import engine
 from src.features.elo import add_elo, final_elos
 from src.features.matchup import load_team_games, to_matchup
 from src.features.odds_math import moneyline_to_fair_prob
+from src.finance.backtest import BacktestConfig, run_backtest
+from src.finance.staking import build as build_strategy
 from src.models.calibration import expected_calibration_error, reliability_table
+from src.models.walkforward import make_xgb_predict_fn, walk_forward_predictions
+from src.models.xgboost_model import select_features
 
 st.set_page_config(page_title="CourtIQ", page_icon="🏀", layout="wide")
 
@@ -112,8 +117,8 @@ st.sidebar.markdown(
     "`python -m src.pipeline.daily_update --model-version v1`"
 )
 
-tab_today, tab_history, tab_edge, tab_elo = st.tabs(
-    ["Today's Predictions", "Historical Accuracy", "Edge Finder", "Elo Leaderboard"]
+tab_today, tab_history, tab_edge, tab_elo, tab_backtest = st.tabs(
+    ["Today's Predictions", "Historical Accuracy", "Edge Finder", "Elo Leaderboard", "Backtest"]
 )
 
 
@@ -252,3 +257,140 @@ with tab_elo:
                      hide_index=True, width="stretch")
     st.subheader("All 30 teams")
     st.bar_chart(elo_df.set_index("abbrev")["elo"])
+
+
+# ---------- Tab 5: backtest ----------
+
+FEATURES_PATH = ROOT / "data" / "processed" / "features.parquet"
+
+
+@st.cache_data(ttl=3600)
+def _walk_forward_preds(initial_train: int, mode: str, window: int) -> pd.DataFrame:
+    """Cache the walk-forward run — it trains N XGBoost models and takes a while."""
+    df = pd.read_parquet(FEATURES_PATH)
+    features = select_features(df)
+    return walk_forward_predictions(
+        df, make_xgb_predict_fn(features),
+        initial_train_seasons=initial_train, mode=mode, window=window,
+    )
+
+
+@st.cache_data(ttl=300)
+def _historical_odds() -> pd.DataFrame:
+    try:
+        df = pd.read_sql_query(
+            text("SELECT game_date, home_team_id, away_team_id, bookmaker, ml_home, ml_away "
+                 "FROM odds_snapshots WHERE ml_home IS NOT NULL AND ml_away IS NOT NULL"),
+            engine,
+        )
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    df["game_date"] = pd.to_datetime(df["game_date"])
+    return df
+
+
+@st.cache_data(ttl=600)
+def _outcomes() -> pd.DataFrame:
+    raw = load_team_games(engine)
+    return (
+        raw[raw["is_home"]][["game_id", "won"]]
+        .rename(columns={"won": "home_won"})
+        .drop_duplicates(subset="game_id")
+    )
+
+
+with tab_backtest:
+    st.header("Bankroll simulation")
+    odds_hist = _historical_odds()
+    if odds_hist.empty:
+        st.info(
+            "No historical odds in the database. Import a Kaggle NBA odds CSV:\n\n"
+            "`python -m src.ingest.ingest_historical_odds --inspect path/to/file.csv`\n\n"
+            "then build a column map and run with `--csv ... --column-map ...`."
+        )
+    else:
+        col1, col2, col3 = st.columns(3)
+        strategy_kind = col1.selectbox(
+            "Strategy",
+            options=["fractional_kelly", "threshold_kelly", "full_kelly",
+                     "capped_kelly", "fixed_fractional", "flat"],
+            index=0,
+        )
+        bankroll = col1.number_input("Starting bankroll ($)", value=10_000, step=1000, min_value=100)
+
+        multiplier = col2.slider("Kelly multiplier", 0.05, 1.00, 0.25, step=0.05)
+        min_edge = col2.slider("Min edge (backtest-level)", 0.00, 0.10, 0.02, step=0.005)
+
+        max_conc = col3.slider("Max concurrent exposure", 0.10, 1.00, 0.50, step=0.05)
+        side = col3.selectbox("Side", ["best", "home", "away"], index=0)
+
+        cfg_dict: dict = {"type": strategy_kind}
+        if strategy_kind == "flat":
+            cfg_dict["unit"] = col1.number_input("Flat unit ($)", value=100.0, step=10.0)
+        elif strategy_kind == "fixed_fractional":
+            cfg_dict["pct"] = col1.slider("Fixed pct", 0.005, 0.10, 0.02, step=0.005)
+        elif strategy_kind in ("fractional_kelly", "threshold_kelly", "capped_kelly"):
+            cfg_dict["multiplier"] = multiplier
+            if strategy_kind == "threshold_kelly":
+                cfg_dict["min_edge"] = col2.slider("Strategy-level min edge", 0.00, 0.10, 0.02, step=0.005)
+            if strategy_kind == "capped_kelly":
+                cfg_dict["max_fraction"] = col2.slider("Per-bet cap", 0.01, 0.25, 0.05, step=0.01)
+
+        if st.button("Run backtest", type="primary"):
+            with st.spinner("Training walk-forward predictions and replaying games..."):
+                preds = _walk_forward_preds(initial_train=3, mode="expanding", window=3)
+                outcomes = _outcomes()
+                strategy = build_strategy(cfg_dict)
+                cfg = BacktestConfig(
+                    strategy=strategy,
+                    starting_bankroll=float(bankroll),
+                    min_edge=float(min_edge),
+                    side=side,
+                    bookmaker=None,
+                    max_concurrent_exposure=float(max_conc),
+                )
+                result = run_backtest(preds, odds_hist, outcomes, cfg)
+
+            s = result.summary
+            st.subheader("Summary")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("ROI", f"{s['roi']:+.2%}")
+            m1.metric("Hit rate", f"{s['hit_rate']:.2%}" if s["hit_rate"] == s["hit_rate"] else "—")
+            m2.metric("Sharpe", f"{s['sharpe']:.2f}")
+            m2.metric("Sortino", f"{s['sortino']:.2f}")
+            m3.metric("Max drawdown", f"{s['max_drawdown']:.2%}")
+            m3.metric("Calmar", f"{s['calmar']:.2f}" if np.isfinite(s["calmar"]) else "∞")
+            m4.metric("# bets", f"{s['n_bets']}")
+            m4.metric("Avg edge", f"{s['avg_edge']:+.3f}")
+
+            st.subheader("Equity curve")
+            eq_df = result.equity.reset_index()
+            eq_df.columns = ["date", "bankroll"]
+            eq_df["date"] = pd.to_datetime(eq_df["date"])
+            st.line_chart(eq_df.set_index("date")["bankroll"])
+
+            if not result.bets.empty:
+                st.subheader("Drawdown curve")
+                eq = result.equity
+                dd = eq / eq.cummax() - 1
+                dd_df = dd.reset_index()
+                dd_df.columns = ["date", "drawdown"]
+                dd_df["date"] = pd.to_datetime(dd_df["date"])
+                st.area_chart(dd_df.set_index("date")["drawdown"])
+
+                st.subheader("Stake size distribution")
+                st.bar_chart(result.bets["stake"].round(0).value_counts().sort_index())
+
+                st.subheader("Bets")
+                view_cols = [
+                    "game_date", "game_id", "side", "entry_ml", "model_prob",
+                    "edge", "stake", "kelly_fraction_used", "status", "payout",
+                ]
+                st.dataframe(result.bets[view_cols].round({
+                    "model_prob": 3, "edge": 3, "stake": 2,
+                    "kelly_fraction_used": 4, "payout": 2,
+                }), hide_index=True, width="stretch")
+            else:
+                st.info("No bets placed — try lowering min edge or switching strategy.")

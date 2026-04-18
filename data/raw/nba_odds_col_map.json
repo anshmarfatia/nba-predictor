@@ -1,0 +1,8 @@
+{
+  "date": "date",
+  "home_team": "home",
+  "away_team": "away",
+  "home_ml": "moneyline_home",
+  "away_ml": "moneyline_away",
+  "bookmaker": "kaggle_close"
+}

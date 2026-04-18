@@ -152,6 +152,50 @@ def walk_forward_evaluate(
     return pd.DataFrame(rows)
 
 
+def walk_forward_predictions(
+    df: pd.DataFrame,
+    predict_fn: Callable[[pd.DataFrame, pd.DataFrame], np.ndarray],
+    *,
+    initial_train_seasons: int = 3,
+    mode: str = "expanding",
+    window: int = 3,
+    season_col: str = "season",
+    keep_cols: tuple[str, ...] = ("game_id", "game_date", "home_team_id", "away_team_id", "home_won"),
+) -> pd.DataFrame:
+    """Return one row per *test-fold* game with the model's leak-free probability.
+
+    The output is the finance layer's sole source of `model_prob`: every row
+    is a game whose season was an out-of-sample test in the fold that
+    produced it, so the model never saw it at training time.
+
+    Columns returned:
+      keep_cols + [model_prob, fold, predicted_at]
+
+    `predicted_at` is set to the last game date in the training set, a
+    conservative timestamp ("the model existed by then"). The backtest's
+    no-look-ahead check uses `predicted_at <= game_date`.
+    """
+    frames = []
+    for fold in walk_forward_splits(
+        df,
+        initial_train_seasons=initial_train_seasons,
+        mode=mode,
+        window=window,
+        season_col=season_col,
+    ):
+        probs = predict_fn(fold.train, fold.test)
+        present = [c for c in keep_cols if c in fold.test.columns]
+        out = fold.test[present].copy()
+        out["model_prob"] = probs
+        out["fold"] = fold.test_season
+        out["predicted_at"] = pd.to_datetime(fold.train["game_date"].max())
+        frames.append(out)
+        log.info("fold %s → %d test rows", fold.test_season, len(out))
+    if not frames:
+        return pd.DataFrame(columns=list(keep_cols) + ["model_prob", "fold", "predicted_at"])
+    return pd.concat(frames, ignore_index=True).sort_values("game_date").reset_index(drop=True)
+
+
 def summarize(metrics: pd.DataFrame) -> pd.Series:
     """Mean and std across folds — report both. Std matters: a single lucky fold
     shouldn't anchor how good you think the model is."""

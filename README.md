@@ -263,9 +263,27 @@ keeps every downstream metric honest.
 
 ---
 
+## Finance layer: the honest result
+
+The project includes a full betting backtest (`src/finance/`) against Kaggle closing moneylines (2007–2022, 19,820 rows). The headline finding:
+
+| Model edge over closing line | # bets | Bet-side win rate |
+|------------------------------|:------:|:-----------------:|
+| 0 – 2 %                      | 459    | **43.6 %**        |
+| 2 – 5 %                      | 672    | **43.8 %**        |
+| 5 – 8 %                      | 668    | **43.1 %**        |
+| 8 – 12 %                     | 685    | **36.8 %**        |
+| 12 – 20 %                    | 699    | **38.1 %**        |
+| 20 %+                        | 288    | **29.9 %**        |
+
+The model is accurate (65 %) but has **no betting alpha**. The edge signal is perfectly inverted: the more confidently the model disagrees with the market, the more often the market is right. This is market efficiency behaving as expected — the closing line knows things our feature set cannot see (line movement, lineup news, sharp money).
+
+The full analysis is in [docs/FINANCE.md](docs/FINANCE.md) and [notebooks/04_betting_backtest.ipynb](nba-predictor/notebooks/04_betting_backtest.ipynb). The infrastructure — walk-forward predictions, Kelly sizing with simultaneous-bet normalization, Sharpe / drawdown / Calmar on sparse bet-day returns, a bet-log audit table — is all there. It just confirms that a 65 %-accurate moneyline model does not beat the closing line with this feature set.
+
 ## What's next
 
-- **LightGBM + stacking ensemble** — cheap accuracy bump; slot in beside XGBoost.
+- **Meta-model on top of market price** — use `market_prob` as a prior, learn residual alpha. Only research direction that could plausibly produce betting alpha given the finding above.
+- **LightGBM + stacking ensemble** — cheap accuracy bump; slot in beside XGBoost. Helps prediction, not necessarily alpha.
 - **Point-spread / totals regression head** — the odds data already supports this.
 - **Play-by-play ingestion** (`nba_api.stats.endpoints.playbyplayv2`) —
   unlocks live win-probability (Phase 4).
