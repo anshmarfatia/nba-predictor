@@ -265,7 +265,15 @@ keeps every downstream metric honest.
 
 ## Finance layer: the honest result
 
-The project includes a full betting backtest (`src/finance/`) against Kaggle closing moneylines (2007–2022, 19,820 rows). The headline finding:
+The project includes a full betting backtest (`src/finance/`) against Kaggle closing moneylines (2007–2022, 19,820 rows). Three charts summarize the finding; the full visual set lives in [docs/FINANCE.md](docs/FINANCE.md).
+
+![Model comparison across OOS folds](docs/assets/model_comparison.png)
+
+![Equity curves — 0.25× Kelly, 2% min-edge](docs/assets/equity_curve_overlay.png)
+
+![Meta-LR edge-bucket win rate](docs/assets/edge_bucket_meta_lr.png)
+
+The headline finding:
 
 | Model edge over closing line | # bets | Bet-side win rate |
 |------------------------------|:------:|:-----------------:|
