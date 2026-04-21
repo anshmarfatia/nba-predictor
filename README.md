@@ -280,10 +280,20 @@ The model is accurate (65 %) but has **no betting alpha**. The edge signal is pe
 
 The full analysis is in [docs/FINANCE.md](docs/FINANCE.md) and [notebooks/04_betting_backtest.ipynb](nba-predictor/notebooks/04_betting_backtest.ipynb). The infrastructure — walk-forward predictions, Kelly sizing with simultaneous-bet normalization, Sharpe / drawdown / Calmar on sparse bet-day returns, a bet-log audit table — is all there. It just confirms that a 65 %-accurate moneyline model does not beat the closing line with this feature set.
 
+**Meta-model residual-alpha test** ([docs/FINANCE.md §8.1](docs/FINANCE.md)). A side-level meta-model (L2-regularized logistic regression primary, shallow XGBoost as robustness check) was trained via nested walk-forward to test whether combining `side_model_prob` and `side_market_prob` via logit-space features extracts residual edge. Benchmark: market-only. Result: market-only wins on log-loss (0.610 vs 0.612 LR / 0.624 XGB), meta-LR ROI −10.7 % with 95 % bootstrap CI `[−21.6 %, +0.5 %]`, negative in both test folds. **No residual alpha found** — granting the model the market itself as a feature still doesn't produce positive-EV signal on this feature set. The strongest possible form of the market-efficiency finding.
+
 ## What's next
 
-- **Meta-model on top of market price** — use `market_prob` as a prior, learn residual alpha. Only research direction that could plausibly produce betting alpha given the finding above.
-- **LightGBM + stacking ensemble** — cheap accuracy bump; slot in beside XGBoost. Helps prediction, not necessarily alpha.
+Given the meta-model's negative result (closing above), the natural next research directions are feature additions, not modeling changes:
+
+- **Line-movement features** — opening line, intraday line moves, closing-line value (CLV) as a predictor. Requires paid historical odds with timestamps, not the single-snapshot Kaggle closes used here.
+- **Lineup-level availability** — not just top-3 rotation minutes but actual game-day starter announcements (NLP on injury reports, late-scratch detection).
+- **Referee crew assignments** — crew-level scoring / foul-rate tendencies are public but not in our feature set.
+- **Faster feature refresh** — re-score the model at T-30 min (after lineup release) rather than morning-of. Deployment-engineering problem.
+
+Existing wish-list items not attempted:
+
+- **LightGBM + stacking ensemble** — cheap accuracy bump; helps prediction, not necessarily alpha.
 - **Point-spread / totals regression head** — the odds data already supports this.
 - **Play-by-play ingestion** (`nba_api.stats.endpoints.playbyplayv2`) —
   unlocks live win-probability (Phase 4).

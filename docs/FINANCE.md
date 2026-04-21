@@ -410,6 +410,118 @@ None of these are promised to produce alpha. Market efficiency is a
 high bar. But they are the right directions for someone who wanted
 to try.
 
+## 8.1 Meta-model result (executed)
+
+§8 listed "meta-model on top of the market price" as the first research
+direction. It was built and run. This section reports the empirical
+finding.
+
+### Method
+
+**Side-level dataset, not home-only.** Each valid game produces two rows,
+one for each side, and the meta-model learns `P(this side wins)` from
+`(side_model_prob, side_market_prob, edge, logit features)`. Symmetric
+learning; no home-bias artifact. A compat shim (`side_to_home_preds`)
+feeds the resulting predictions back into the existing home-level
+backtest.
+
+**Primary model**: L2-regularized logistic regression (`C=0.5`) on seven
+features — the raw probabilities, their edge and absolute edge, and their
+logit-space counterparts (`logit(p) = log(p / (1-p))`, clipped at
+`p ∈ [10⁻⁴, 1 - 10⁻⁴]`). Coefficients are reported for transparency but
+*not* interpreted causally — `side_model_prob`, `side_market_prob`, and
+`edge` are highly collinear and regularization redistributes weight in
+ways that don't reflect individual importance.
+
+**Robustness check**: XGBoost with `max_depth=2`, `reg_lambda=5`,
+`subsample=0.7`, early stopping on an inner-val fold carved from the
+training window. Scaled down because the sample is small.
+
+**Nested walk-forward.** Meta-test folds are the base model's test
+folds. Training on folds ≤ N and testing on fold N+1 preserves the
+no-look-ahead discipline at both levels. Three outer test folds are
+available on the intersection of base OOS predictions and Kaggle
+moneyline coverage: 2020-21, 2021-22, 2022-23 (partial — moneyline
+coverage collapses late in 2022-23).
+
+**Null hypothesis**: the market-only model (using `side_market_prob`
+directly). If the meta-model does not beat market-only on BOTH
+out-of-sample log-loss AND realized ROI, the honest conclusion is that
+no residual alpha was found.
+
+### Result
+
+Measured on the same **5,102 OOS side-rows** across three test folds:
+
+| Variant                    | Log-loss | Brier  | AUC   | ECE    | ROI @ 2 % edge | 95 % CI            | n bets |
+|----------------------------|---------:|-------:|------:|-------:|---------------:|:------------------:|-------:|
+| base model                 | 0.642    | 0.225  | 0.681 | 0.012  | −2.95 %        | [−8.74 %, +3.29 %] | 2,212  |
+| **market-only (benchmark)**| **0.610**| **0.211** | **0.727** | 0.010 | — (no bets) | — | —      |
+| meta-LR                    | 0.612    | 0.212  | 0.725 | 0.008  | −10.72 %       | [−21.57 %, +0.52 %]| 776    |
+| meta-XGB                   | 0.624    | 0.217  | 0.716 | 0.040  | −5.31 %        | [−12.28 %, +1.80 %]| 1,721  |
+
+Per-fold ROI for meta-LR:
+
+| Fold     | n bets | ROI     | 95 % CI             |
+|----------|-------:|--------:|:-------------------:|
+| 2020-21  | 528    | −8.10 % | [−19.79 %, +4.33 %] |
+| 2021-22  | 248    | −16.32 %| [−37.39 %, +6.42 %] |
+| 2022-23  | 0      | —       | (no betting odds)   |
+
+Portfolio backtest via `run_backtest` (0.25× Kelly + 2 % min-edge) on the
+meta predictions:
+
+| Variant   | End bankroll ($) | ROI     | Sharpe | MDD     | Hit rate |
+|-----------|-----------------:|--------:|-------:|--------:|---------:|
+| meta-LR   | 3,982            | −12.43 %| −1.66  | −60.18 %| 31.7 %   |
+| meta-XGB  | 86               | −12.12 %| −1.24  | −99.26 %| 33.1 %   |
+
+### Reading the result against the pre-registered alpha criteria
+
+1. **ROI > 0 out-of-sample** — ❌ no variant clears zero.
+2. **Bootstrap 95 % CI excludes zero** — ❌ meta-LR's upper bound is +0.5 %
+   (grazes zero); meta-XGB's is +1.8 %. Neither is significantly positive.
+3. **Consistent sign across folds** — ❌ meta-LR is negative in both folds
+   that had bets (−8 %, −16 %).
+4. **Beats market-only OOS on log-loss** — ❌ market wins (0.610 vs 0.612 /
+   0.624). The LR tie (+0.002) is within noise but even taking it at face
+   value the ROI test fails the claim.
+
+**Conclusion**: no residual alpha was found. The meta-model learns to
+shrink the base model's disagreement with the market and to regress
+toward `side_market_prob`, but the residual variation it captures is
+negatively correlated with realized outcomes — meaning the specific
+contexts where the base model most disagrees with the market are the
+contexts where the market knows the most.
+
+### Interpretation
+
+This is the strongest possible form of the §7 market-efficiency argument:
+**even granting the model access to the market itself as a feature, no
+edge emerges**. Everything that the base feature set (rolling team stats,
+Elo, rest, rotation availability) can contribute is already priced into
+the closing line. The information gap between our features and the
+market's implicit feature set is not crossable from inside our feature
+set.
+
+For this model to find real alpha, additional information is required —
+intraday line movement, lineup announcements, crew-level referee data,
+public-betting-percentage fades. Those are the directions listed in §8
+that remain open. None are trivial.
+
+### A note on what "could have" gone right
+
+Had the meta-model found a narrow regime of residual alpha — say, the
+base model outperforming on high rest-differential games or against
+specific opponent pace profiles — that would have been a genuine
+deployment-ready signal, sized by a capped-Kelly policy on the
+restricted subset. The absence of such a regime across the entire
+feature space after a fair, nested-walk-forward test with a market-only
+baseline is the cleanest possible null: not a failure of methodology,
+but a feature of the problem.
+
+---
+
 ## 9. Limits of the sports/equities analog
 
 Even setting aside the specific alpha result, sports betting differs
@@ -457,6 +569,9 @@ learning, including the one about market efficiency.
 | CLI driver                | [generate_bets.py](../src/pipeline/generate_bets.py) |    |
 | Bet log schema            | [bet_log.py](../src/finance/bet_log.py)            |      |
 | Walk-forward predictions  | [walkforward.py#walk_forward_predictions](../src/models/walkforward.py) |  |
+| Meta-model (§8.1)         | [meta_model.py](../src/models/meta_model.py)       |      |
+| Side-level dataset builder| [meta_model.py#build_side_frame](../src/models/meta_model.py) |  |
+| Meta-model tests          | [test_meta_model.py](../tests/test_meta_model.py)  |      |
 | Five-strategy comparison  | [04_betting_backtest.ipynb](../notebooks/04_betting_backtest.ipynb) |  |
 | Dashboard tab             | [app.py (Backtest tab)](../dashboard/app.py)       |      |
 

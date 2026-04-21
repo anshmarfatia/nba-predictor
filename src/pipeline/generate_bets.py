@@ -117,6 +117,13 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--season", default=None,
                    help="Restrict to a single season (e.g. '2023-24').")
+    p.add_argument("--predictions-source", type=Path, default=None,
+                   help="Read predictions from a parquet (skip walk-forward). For the "
+                        "meta-model output, combine with --prob-column meta_prob_lr to pick "
+                        "which column from the side frame to use as home-level P(home).")
+    p.add_argument("--prob-column", default="model_prob",
+                   help="Column name to use as P(home_win) when --predictions-source is set. "
+                        "Side-level frames expose meta_prob_lr / meta_prob_xgb via the side_to_home_preds shim.")
     p.add_argument("--persist", action="store_true",
                    help="Write bets to the bet_log table. Default is print-only.")
     p.add_argument("--replace-run", default=None,
@@ -131,27 +138,42 @@ def main() -> int:
     if args.create_tables:
         ensure_table()
 
-    log.info("Loading features from %s", FEATURES_PATH)
-    features_df = pd.read_parquet(FEATURES_PATH)
-    feature_cols = select_features(features_df)
-    log.info("Features: %d seasons, %d cols", features_df["season"].nunique(), len(feature_cols))
+    if args.predictions_source is not None:
+        log.info("Reading predictions from %s (column: %s)", args.predictions_source, args.prob_column)
+        src = pd.read_parquet(args.predictions_source)
+        if "side" in src.columns:
+            # Side-level meta frame — pull home rows and rename the chosen prob column.
+            from src.models.meta_model import side_to_home_preds
+            preds = side_to_home_preds(src, args.prob_column)
+        else:
+            preds = src.copy()
+            if args.prob_column != "model_prob":
+                preds = preds.rename(columns={args.prob_column: "model_prob"})
+            preds = preds.dropna(subset=["model_prob"]).reset_index(drop=True)
+        preds["game_date"] = pd.to_datetime(preds["game_date"])
+        log.info("Loaded %d predictions from %s", len(preds), args.predictions_source)
+    else:
+        log.info("Loading features from %s", FEATURES_PATH)
+        features_df = pd.read_parquet(FEATURES_PATH)
+        feature_cols = select_features(features_df)
+        log.info("Features: %d seasons, %d cols", features_df["season"].nunique(), len(feature_cols))
 
-    log.info("Running walk-forward to produce leak-free predictions (%s, %d-season warmup)...",
-             args.mode, args.initial_train)
-    preds = walk_forward_predictions(
-        features_df,
-        make_xgb_predict_fn(feature_cols),
-        initial_train_seasons=args.initial_train,
-        mode=args.mode,
-        window=args.window,
-    )
+        log.info("Running walk-forward to produce leak-free predictions (%s, %d-season warmup)...",
+                 args.mode, args.initial_train)
+        preds = walk_forward_predictions(
+            features_df,
+            make_xgb_predict_fn(feature_cols),
+            initial_train_seasons=args.initial_train,
+            mode=args.mode,
+            window=args.window,
+        )
     if args.season:
         preds = preds[preds["fold"] == args.season].copy()
         if preds.empty:
             log.error("No predictions for season %s — did walk-forward cover it?", args.season)
             return 2
-    log.info("Walk-forward predictions: %d rows across %d fold(s)",
-             len(preds), preds["fold"].nunique())
+    log.info("Predictions: %d rows across %d fold(s)",
+             len(preds), preds["fold"].nunique() if "fold" in preds.columns else 1)
 
     log.info("Loading odds from DB...")
     odds = load_odds_from_db()
